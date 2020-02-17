@@ -23,9 +23,7 @@ type
     fcNormal = "Normal"
     fcSubnormal = "Subnormal"
     fcZero = "0E0"
-    fcNegZero = "-0E0"
     fcInf = "Infinity"
-    fcNegInf = "-Infinity"
     fcNaN = "NaN"
 
 proc `==`(a, b: Exponent): bool {.borrow.}
@@ -76,18 +74,12 @@ func classify*(f: SomeFloat): FloatClass {.inline.} =
   case f.exponent
   of 0.Exponent:
     if f.fraction == 0.Fraction:
-      if f.sign:
-        fcNegZero
-      else:
-        fcZero
+      fcZero
     else:
       fcSubnormal
   of f.expMax.Exponent:
     if f.fraction == 0.Fraction:
-      if f.sign:
-        fcNegInf
-      else:
-        fcInf
+      fcInf
     else:
       fcNaN
   else:
@@ -102,6 +94,8 @@ type
 func addF(s: var string, f: SomeFloat) =
   let class = f.classify
   if class notin {fcSubnormal, fcNormal}:
+    if class != fcNaN and f.sign:
+      s.add '-'
     s.add $class
     return
 
@@ -143,12 +137,12 @@ when isMainModule:
 
   check classify(0.0f32) == fcZero
   check classify(0.0f64) == fcZero
-  check classify(-0.0f32) == fcNegZero
-  check classify(-0.0f64) == fcNegZero
+  check classify(-0.0f32) == fcZero
+  check classify(-0.0f64) == fcZero
   check classify(Inf.float32) == fcInf
   check classify(Inf.float64) == fcInf
-  check classify(NegInf.float32) == fcNegInf
-  check classify(NegInf.float64) == fcNegInf
+  check classify(NegInf.float32) == fcInf
+  check classify(NegInf.float64) == fcInf
   check classify(NaN.float32) == fcNaN
   check classify(NaN.float64) == fcNaN
   check classify(1.0f32) == fcNormal
@@ -157,6 +151,15 @@ when isMainModule:
   check classify(-1.0f64) == fcNormal
   check classify(7.175E-43f32) == fcSubnormal
   check classify(1.8459939872957E-310f64) == fcSubnormal
+
+  check not sign(0.0f32)
+  check not sign(0.0f64)
+  check sign(-0.0f32)
+  check sign(-0.0f64)
+  check not sign(Inf.float32)
+  check not sign(Inf.float64)
+  check sign(NegInf.float32)
+  check sign(NegInf.float64)
 
   var s: string
   s.addF NaN
