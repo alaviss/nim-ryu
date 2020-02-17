@@ -58,7 +58,7 @@ template expMax*(f: SomeFloat): untyped = 1 shl f.expBitSize - 1
 template expBias*(f: SomeFloat): untyped = 1 shl (f.expBitSize - 1) - 1
   ## The exponent bias of a float
 
-func isNegative*(f: SomeFloat): bool {.inline.} =
+func sign*(f: SomeFloat): bool {.inline.} =
   ## Check if the sign bit in the float is set.
   let impl = f.toImpl
   testBit(impl, sizeof(impl) * 8 - 1)
@@ -76,7 +76,7 @@ func classify*(f: SomeFloat): FloatClass {.inline.} =
   case f.exponent
   of 0.Exponent:
     if f.fraction == 0.Fraction:
-      if f.isNegative:
+      if f.sign:
         fcNegZero
       else:
         fcZero
@@ -84,7 +84,7 @@ func classify*(f: SomeFloat): FloatClass {.inline.} =
       fcSubnormal
   of f.expMax.Exponent:
     if f.fraction == 0.Fraction:
-      if f.isNegative:
+      if f.sign:
         fcNegInf
       else:
         fcInf
@@ -126,7 +126,7 @@ func addF(s: var string, f: SomeFloat) =
   # In here we flatten the formula into:
   #   sign * 2 ^ exp * frac
   let
-    sign = if f.isNegative: -1 else: 1
+    sign = if f.sign: -1 else: 1
     frac =
       if class == fcNormal:
         f.fraction.uint64 + 2 shl (f.fractionBitSize - 1)
