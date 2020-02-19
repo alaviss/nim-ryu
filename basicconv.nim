@@ -11,12 +11,12 @@
 ## reference to evaluate other algorithms, such as ryū. It should not be used
 ## in production due to slow arithmetic regarding larger float sizes.
 
-import bitops
+import bitops, typetraits, strutils
 
 type
-  Exponent* = distinct uint16
+  Exponent* = distinct int16
     ## A type that can store the biggest IEEE exponent of supported float types
-  Fraction* = distinct uint64
+  Fraction* = distinct int64
     ## A type that can store the biggest IEEE fraction of supported float types
 
   FloatClass* = enum
@@ -85,11 +85,8 @@ func classify*(f: SomeFloat): FloatClass {.inline.} =
   else:
     fcNormal
 
-type
-  UnifiedFloat = object
-    negative: bool
-    frac: Fraction
-    exponent: Exponent
+template toBase[T](d: T): untyped =
+  T.distinctBase()(d)
 
 func addF(s: var string, f: SomeFloat) =
   let class = f.classify
@@ -104,7 +101,7 @@ func addF(s: var string, f: SomeFloat) =
   #
   # Ignoring special cases, the number it represents is calculated using this
   # formula:
-  #   (-1) ^ sign.ord * 2 ^ (exp - exponent_bias) * frac * 2 ^ (-fractionBitSize)
+  #   (-1) ^ sign.ord * 2 ^ (exp - expBias) * frac * 2 ^ (-fractionBitSize)
   #   where
   #     frac =
   #       if exponent != 0:
@@ -119,18 +116,108 @@ func addF(s: var string, f: SomeFloat) =
   #
   # In here we flatten the formula into:
   #   sign * 2 ^ exp * frac
+  #   where -- see below
   let
     sign = if f.sign: -1 else: 1
     frac =
       if class == fcNormal:
-        f.fraction.uint64 + 2 shl (f.fractionBitSize - 1)
+        f.fraction.toBase + 1 shl f.fractionBitSize
       else:
-        f.fraction.uint64
+        f.fraction.toBase
     exp =
       if class == fcNormal:
-        f.exponent.int - f.expBias.int - f.fractionBitSize
+        f.exponent.toBase - f.expBias - f.fractionBitSize
       else:
-        1 - f.expBias.int - f.fractionBitSize
+        1 - f.expBias - f.fractionBitSize
+
+  # To generate a string representation, we want to change this:
+  #   sign * 2 ^ exp * frac
+  #
+  # Into this:
+  #   sign * 10 ^ exp10 * frac10
+  #
+  # Which will allow us to print the fraction using a simple
+  # int-to-string function, then place the decimal point according to the
+  # exponent.
+  #
+  # But it's not that easy. Here's how 10.1 is represented in IEEE single
+  # precision binary floating point:
+  #
+  #   sign|exponent|       fraction
+  #      0|10000010|01000011001100110011010
+  #
+  # Which translates exactly to:
+  #   10.1000003814697265625
+  #
+  # which is the closest possible representation of 10.1 in IEEE binary32 float.
+  #
+  # But we want to print 10.1, so we have to find a way to omit unneeded digits
+  #   10.1000003814697265625
+  #       ^~~~~~~~~~~~~~~~~~
+  #       we want to get rid of this
+  #
+  # According to the "Ryū" paper, the interval in which we would find the
+  # desired output would be the halfway point between the next smaller and
+  # larger floating point values of the same type, which could be represented
+  # like this with our flattened representation:
+  #
+  #   (frac * 2 ^ exp + (frac - 1) * 2 ^ exp) / 2 .. (frac * 2 ^ exp + (frac + 1) * 2 ^ exp) / 2
+  #    ^~~~~~~~~~~~~~   ^~~~~~~~~~~~~~~~~~~~                           ^~~~~~~~~~~~~~~~~~~~
+  #    our current float  the next smaller float                       the next larger float
+  #
+  # However, notice the phrase "floating point values of the same type".
+  # This forces us to take the type of the current float into account, meaning:
+  # [(frac - 1) * 2 ^ exp] and [(frac + 1) * 2 ^ exp] each must be representable
+  # by the current floating point type. We don't evaluate the sign here since
+  # it doesn't affect the precision of the floating point type. We also assume
+  # that infinity doesn't exist, since if we represent infinity just like any
+  # other normal number, it will be the next larger float of the largest
+  # representable float, so ignoring it will simplify calculations.
+  #
+  # Refering to the floating point type described above, `fraction` is stored
+  # as an uint, which means that the overflow/underflow behavior of it must be
+  # taken into account.
+  #
+  # If `fraction` is at maximum (2 ^ fractionBitSize - 1), then the next larger
+  # floating point value will be:
+  #   2 ^ (exp' - expBias) * frac' * 2 ^ (-fractionBitSize)
+  #   where
+  #     frac' = 2 ^ fractionBitSize
+  #     exp' =
+  #       if exponent != 0:
+  #         exponent + 1 -- normal
+  #       else:
+  #         1 -- subnormal
+  #
+  # Which, in our flattened representation, will be:
+  #   2 ^ exp' * frac'
+  #   where
+  #     exp' =
+  #       if exponent != 0:
+  #         exponent + 1 - expBias - fractionBitSize -- normal
+  #       else:
+  #         1 - expBias - fractionBitSize -- subnormal
+  #
+  # Let's see if our "next larger float" is the same as this float:
+  #     2 ^ exp' * frac' = 2 ^ exp * (frac + 1)
+  # if exponent == 0:
+  #     exp' = exp
+  #     frac = 2 ^ fractionBitSize - 1
+  # <=> 2 ^ exp * frac' = 2 ^ exp * (frac + 1)
+  # <=> 2 ^ exp * 2 ^ fractionBitSize = 2 ^ exp * (frac + 1)
+  # <=> 2 ^ exp * (2 ^ fractionBitSize - 1 + 1) = 2 ^ exp * (frac + 1)
+  # <=> 2 ^ exp * (fraction + 1) = 2 ^ exp * (frac + 1)
+  # <=> 2 ^ exp * (frac + 1) = 2 ^ exp * (frac + 1)
+  # else:
+  #     exp' = exp + 1
+  #     frac = 2 ^ (fractionBitSize + 1) - 1
+  # <=> 2 ^ (exp + 1) * frac' = 2 ^ exp * (frac + 1)
+  # <=> 2 ^ (exp + 1) * 2 ^ fractionBitSize = 2 ^ exp * (frac + 1)
+  # <=> 2 ^ exp * 2 ^ (fractionBitSize + 1) = 2 ^ exp * (frac + 1)
+  # <=> 2 ^ exp * (2 ^ (fractionBitSize + 1) - 1 + 1) = 2 ^ exp * (frac + 1)
+  # <=> 2 ^ exp * (frac + 1) = 2 ^ exp * (frac + 1)
+  #
+  # So yes, our "next larger float" should be the same as this one.
 
 when isMainModule:
   import unittest
@@ -165,4 +252,5 @@ when isMainModule:
   s.addF NaN
   echo s
   s.addF 10.1
+  s.addF 10.1f32
   s.addF 7.175E-43f32
