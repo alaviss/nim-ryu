@@ -11,7 +11,9 @@
 ## reference to evaluate other algorithms, such as ryū. It should not be used
 ## in production due to slow arithmetic regarding larger float sizes.
 
-import bitops, typetraits, strutils
+import bitops, strutils, typetraits
+import math except classify
+import stint
 
 type
   Exponent* = distinct int16
@@ -29,16 +31,8 @@ type
 proc `==`(a, b: Exponent): bool {.borrow.}
 proc `==`(a, b: Fraction): bool {.borrow.}
 
-template notSupp(T: typedesc[SomeFloat]) =
-  {.error: "Unsupported float type: " & $T.}
-
-template toImpl(f: SomeFloat): untyped =
-  when f is float32:
-    cast[uint32](f)
-  elif f is float64:
-    cast[uint64](f)
-  else:
-    notSupp typeof f
+template toImpl(f: float32): untyped = cast[uint32](f)
+template toImpl(f: float64): untyped = cast[uint64](f)
 
 template fractionBitSize*(f: float32): int = 23
   ## The number of bits in the fraction part of IEEE binary32 format
@@ -52,7 +46,8 @@ template expBitSize*(f: float64): int = 11
 template fractionMask*(f: SomeFloat): untyped = 1 shl f.fractionBitSize - 1
   ## Mask to extract the fraction part from a float
 template expMax*(f: SomeFloat): untyped = 1 shl f.expBitSize - 1
-  ## The maximal value of the exponent part in a float
+  ## The maximal value of the exponent part in a float. Note that it is not
+  ## the maximal valid value in an IEEE float.
 template expBias*(f: SomeFloat): untyped = 1 shl (f.expBitSize - 1) - 1
   ## The exponent bias of a float
 
@@ -117,8 +112,9 @@ func addF(s: var string, f: SomeFloat) =
   # In here we flatten the formula into:
   #   sign * 2 ^ exp * frac
   #   where -- see below
-  let
-    sign = if f.sign: -1 else: 1
+  let sign = if f.sign: -1 else: 1
+
+  var
     frac =
       if class == fcNormal:
         f.fraction.toBase + 1 shl f.fractionBitSize
@@ -179,7 +175,7 @@ func addF(s: var string, f: SomeFloat) =
   # taken into account.
   #
   # If `fraction` is at maximum (2 ^ fractionBitSize - 1), then the next larger
-  # floating point value will be:
+  # floating point value of the same type will be:
   #   2 ^ (exp' - expBias) * frac' * 2 ^ (-fractionBitSize)
   #   where
   #     frac' = 2 ^ fractionBitSize
@@ -218,6 +214,156 @@ func addF(s: var string, f: SomeFloat) =
   # <=> 2 ^ exp * (frac + 1) = 2 ^ exp * (frac + 1)
   #
   # So yes, our "next larger float" should be the same as this one.
+  #
+  # If `fraction` is at minimum (0), then the next smaller floating point value
+  # of the same type will be:
+  #   2 ^ (exp' - expBias) * frac' * 2 ^ (-fractionBitSize)
+  #   where
+  #     exp' =
+  #       if exponent > 1:
+  #         exponent - 1
+  #       else:
+  #         1
+  #     frac' =
+  #       if exponent > 1:
+  #         2 ^ (fractionBitSize + 1) - 1
+  #       else:
+  #         2 ^ fractionBitSize - 1
+  #
+  # Which, in our flattened representation, will be:
+  #   2 ^ exp' * frac'
+  #   where
+  #     exp' =
+  #       if exponent > 1:
+  #         exponent - 1 - expBias - fractionBitSize
+  #       else:
+  #         1 - expBias - fractionBitSize
+  #
+  # Let's see if our "next smaller float" is the same as this float:
+  #   2 ^ exp' * frac' = 2 ^ exp * (frac - 1)
+  # if exponent == 1:
+  #     exp' = exp
+  #     frac' = 2 ^ fractionBitSize - 1
+  #     frac = 2 ^ fractionBitSize
+  #     2 ^ exp * frac' = 2 ^ exp * (frac - 1)
+  # <=> 2 ^ exp * (2 ^ fractionBitSize - 1) = 2 ^ exp * (frac - 1)
+  # <=> 2 ^ exp * (frac - 1) = 2 ^ exp * (frac - 1)
+  # elif exponent > 1:
+  #     exp' = exp - 1
+  #     frac' = 2 ^ (fractionBitSize + 1) - 1
+  #     frac = 2 ^ fractionBitSize
+  #     2 ^ (exp - 1) * frac' = 2 ^ exp * (frac - 1)
+  # <=> 2 ^ (exp - 1) * (2 ^ (fractionBitSize + 1) - 1) = 2 ^ exp * (frac - 1)
+  # <=> 2 ^ exp * (2 ^ fractionBitSize - 1/2) = 2 ^ exp * (frac - 1)
+  # <=> 2 ^ exp * (frac - 1/2) = 2 ^ exp * (frac - 1) -- not true
+  #
+  # It appears that our representation only works when the exponent is equal
+  # to 1 and fraction equals to 0. For when exponent is larger than 1 and
+  # fraction equal to 0, it can be represented as shown above:
+  #   2 ^ exp * (frac - 1/2)
+  # = 2 ^ (exp - 1) * (2 * frac - 1) -- keeping frac as an uint
+  #
+  # Note that we do not consider when the exponent is 0 for this case, since
+  # exponent = 0 and fraction = 0 is a special case (zero) and is already
+  # handled above.
+  #
+  # In summary, to represent the next larger float and the next smaller float:
+  # |-  2 ^ exp * (frac + 1) -- next larger
+  # |
+  # |-  2 ^ exp * frac -- current float
+  # |
+  # |   -- next smaller
+  # |- |- exponent > 1 and fraction == 0: 2 ^ (exp - 1) * (2 * frac - 1)
+  #    |- else: 2 ^ exp * (frac - 1)
+  #
+  # To keep things simple, let's use an unified exponent:
+  #   exp' = exp - 1
+  #   current float: 2 ^ exp' * 2 * frac
+  #   next larger: 2 ^ exp' * (2 * frac + 2)
+  #   next smaller:
+  #     if exponent > 1 and fraction == 0:
+  #       2 ^ exp' * (2 * frac - 1)
+  #     else:
+  #       2 ^ exp' * (2 * frac - 2)
+  #
+  # Now these will be our halfway points:
+  #   exp' = exp - 1
+  #   current float: 2 ^ exp' * 2 * frac
+  #   half to next larger:
+  #       (2 ^ exp' * (2 * frac + 2) + 2 ^ exp' * 2 * frac) / 2
+  #     = 2 ^ exp' * (4 * frac + 2) / 2
+  #     = 2 ^ (exp' - 1) * (4 * frac + 2)
+  #   half to next smaller:
+  #     if exponent > 1 and fraction == 0:
+  #         (2 ^ exp' * (2 * frac - 1) + 2 ^ exp' * 2 * frac) / 2
+  #       = 2 ^ exp' * (4 * frac - 1) / 2
+  #       = 2 ^ (exp' - 1) * (4 * frac - 1)
+  #     else:
+  #         (2 ^ exp' * (2 * frac - 2) + 2 ^ exp' * 2 * frac) / 2
+  #       = 2 ^ exp' * (4 * frac - 2) / 2
+  #       = 2 ^ (exp' - 1) * (4 * frac - 2)
+  #
+  # Which we will again unify under the same exponent of:
+  exp = exp - 2
+  frac = 4 * frac
+  let
+    upperFrac = frac + 2
+    lowerFrac =
+      if f.exponent.toBase > 1 and f.fraction.toBase == 0:
+        frac - 1
+      else:
+        frac - 2
+
+  # Convert to decimal power base:
+  # We want to find an exp10 so that:
+  #   2 ^ exp * frac = 10 ^ exp10 * frac10
+  # There are many options, but we will use the one as found in the paper as
+  # it's related to the Ryū algorithm, which is based on this simple algorithm.
+  let exp10 =
+    if exp >= 0:
+      0
+    else:
+      exp
+  # Now we have a problem, if the exponent >= 0, then frac10 will be:
+  #   frac * 2 ^ exp
+  # where exp could be as big as 969 for float64. That's 1073 bits required!
+  # Now if exponent < 0, then frac10 will be:
+  #   frac * 5 ^ (-exp)
+  # where exp might be -1076 for float64. That's 2551 bits required!
+  # We clearly need a way to avoid usage of arbitrary precision integers.
+  # Well that's the point of Ryū. So we are bringing in some outside help for
+  # this.
+  # Here we estimate the amount of bits needed to store the resuting frac10:
+  #
+  #   Our worst case scenario would be:
+  #     frac = 2 ^ fractionBitSize - 1 -- maximal fraction
+  #     exp = 1 - expBias - fractionBitSize - 2 -- minimal exponent
+  #   which results in the equation:
+  #     frac * 5 ^ (-exp)
+  #   We can estimate the required bits by summing the amount of bits required
+  #   for each of the components, which is:
+  #     fracBits = fractionBitSize
+  #     5 ^ (-exp) = 3 * -(1 - expBias + fractionBitSize - 2)
+  #   or:
+  #     frac10Bits = fractionBitSize + 3 * (expBias - 1 - fractionBitSize + 2)
+  #   Then we find the nearest power of two of frac10Bits to use with stint.
+  const Bits = nextPowerofTwo f.fractionBitSize + 3 * (f.expBias - 1 - f.fractionBitSize + 2)
+  type Fraction10 = ref StUint[Bits]
+  # this have to be stored on the heap due to it's huge size (might be over
+  # a half of the typical stack size).
+  let
+    frac10 = new Fraction10
+    upperFrac10 = new Fraction10
+    lowerFrac10 = new Fraction10
+  template toFrac10(frac: untyped): untyped =
+    if exp >= 0:
+      frac.stuint(Bits) shl exp.int
+    else:
+      # will be an integer since exp < 0
+      frac.stuint(Bits) * 5.stuint(Bits).pow(-exp)
+  frac10[] = frac.toFrac10
+  upperFrac10[] = frac.toFrac10
+  lowerFrac10[] = frac.toFrac10
 
 when isMainModule:
   import unittest
