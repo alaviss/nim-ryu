@@ -49,7 +49,7 @@ template expMax*(f: SomeFloat): untyped = 1 shl f.expBitSize - 1
   ## The maximal value of the exponent part in a float. Note that it is not
   ## the maximal valid value in an IEEE float.
 template expBias*(f: SomeFloat): untyped = 1 shl (f.expBitSize - 1) - 1
-  ## The exponent bias of a float
+  ## The exponent bias of a float.
 
 func sign*(f: SomeFloat): bool {.inline.} =
   ## Check if the sign bit in the float is set.
@@ -83,11 +83,13 @@ func classify*(f: SomeFloat): FloatClass {.inline.} =
 template toBase[T](d: T): untyped =
   T.distinctBase()(d)
 
-func addF(s: var string, f: SomeFloat) =
+template inc(i: StInt or StUint) =
+  i = i + 1
+
+func addF(s: var string, f: SomeFloat) {.inline.} =
   let class = f.classify
+  if class != fcNaN and f.sign: s.add '-'
   if class notin {fcSubnormal, fcNormal}:
-    if class != fcNaN and f.sign:
-      s.add '-'
     s.add $class
     return
 
@@ -112,9 +114,10 @@ func addF(s: var string, f: SomeFloat) =
   # In here we flatten the formula into:
   #   sign * 2 ^ exp * frac
   #   where -- see below
-  let sign = if f.sign: -1 else: 1
-
   var
+    # Since the only function of the sign is to determine if a "negative" sign
+    # should be added to the output, we don't have to compute it.
+    # sign = if f.sign: -1 else: 1
     frac =
       if class == fcNormal:
         f.fraction.toBase + 1 shl f.fractionBitSize
@@ -145,8 +148,6 @@ func addF(s: var string, f: SomeFloat) =
   # Which translates exactly to:
   #   10.1000003814697265625
   #
-  # which is the closest possible representation of 10.1 in IEEE binary32 float.
-  #
   # But we want to print 10.1, so we have to find a way to omit unneeded digits
   #   10.1000003814697265625
   #       ^~~~~~~~~~~~~~~~~~
@@ -160,6 +161,9 @@ func addF(s: var string, f: SomeFloat) =
   #   (frac * 2 ^ exp + (frac - 1) * 2 ^ exp) / 2 .. (frac * 2 ^ exp + (frac + 1) * 2 ^ exp) / 2
   #    ^~~~~~~~~~~~~~   ^~~~~~~~~~~~~~~~~~~~                           ^~~~~~~~~~~~~~~~~~~~
   #    our current float  the next smaller float                       the next larger float
+  #
+  # TODO: why this exact interval? neither the talks nor the paper actually
+  # look into the details of this range.
   #
   # However, notice the phrase "floating point values of the same type".
   # This forces us to take the type of the current float into account, meaning:
@@ -319,7 +323,7 @@ func addF(s: var string, f: SomeFloat) =
   #   2 ^ exp * frac = 10 ^ exp10 * frac10
   # There are many options, but we will use the one as found in the paper as
   # it's related to the Ryū algorithm, which is based on this simple algorithm.
-  let exp10 =
+  var exp10 =
     if exp >= 0:
       0
     else:
@@ -362,8 +366,136 @@ func addF(s: var string, f: SomeFloat) =
       # will be an integer since exp < 0
       frac.stuint(Bits) * 5.stuint(Bits).pow(-exp)
   frac10[] = frac.toFrac10
-  upperFrac10[] = frac.toFrac10
-  lowerFrac10[] = frac.toFrac10
+  upperFrac10[] = upperFrac.toFrac10
+  lowerFrac10[] = lowerFrac.toFrac10
+
+  # Now that our searching range is in a decimal power base, we proceed to look
+  # for a real number such that:
+  #   It's the closest to frac10 * 10 ^ exp10.
+  #   It's the shortest possible without losing information.
+  #   It's correctly rounded.
+  #
+  # In our example of 10.1f32, we want to look for 10.1 in here:
+  #    10.0999999046325683593750 .. 10.1000008583068847656250
+  #    ^ halfway to next smaller    ^ halfway to next bigger
+  # which is also the closest value to 10.1000003814697265625000
+  #
+  # So let's look at our numbers:
+  #
+  # |- 10.1000008583068847656250
+  # |
+  # |- 10.1000003814697265625000
+  # |
+  # |- 10.0999999046325683593750
+  #
+  # To get the minimal length value, we can start by trimming the numbers
+  #
+  # |- 10.1000008583068847656250
+  # |      ^~~~~~~~~~~~~~~~~~~~~
+  # |
+  # |- 10.1000003814697265625000
+  # |      ^~~~~~~~~~~~~~~~~~~~~
+  # |
+  # |- 10.0999999046325683593750
+  #        ^~~~~~~~~~~~~~~~~~~~~
+  #
+  # We can just keep trimming until just before the bounds no longer makes sense.
+  var
+    digit = 0 # last digit of frac10
+    allFracZero = true # whether all digits trimmed before the last from frac10
+                       # were zeros.
+    allLowerZero = true # same as allFracZero but for the lower bound.
+  while lowerFrac10[] div 10 < upperFrac10[] div 10:
+    allLowerZero = lowerFrac10[] mod 10 == 0 and allLowerZero
+    lowerFrac10[] = lowerFrac10[] div 10
+
+    allFracZero = digit == 0 and allFracZero
+    digit = truncate(frac10[] mod 10, int)
+    frac10[] = frac10[] div 10
+
+    upperFrac10[] = upperFrac10[] div 10
+    # increase the exponent with every trim, since we are discarding digits.
+    inc exp10
+  if allLowerZero:
+    # our value might be closer to the lower bound, proceeds to trim even more
+    # digits
+    while lowerFrac10[] mod 10 == 0:
+      lowerFrac10[] = lowerFrac10[] div 10
+
+      allFracZero = digit == 0 and allFracZero
+      digit = truncate(frac10[] mod 10, int)
+      frac10[] = frac10[] div 10
+
+      upperFrac10[] = upperFrac10[] div 10
+
+      inc exp10
+  # To get the value closest to the original, we also have to employs rounding.
+  # The rules are simple:
+  let
+    tie = digit == 5 and allFracZero
+    roundUp = (tie or digit > 5 or # round up on tie or if last digit > 5
+               # round up if we are equal to lower bound but not all digits
+               # trimmed from the lower bound is zero, which implies that
+               # the lower bound might not be as close to the original value
+               # as we would like.
+               (lowerFrac10[] == frac10[] and not allLowerZero)) and
+              # we don't want our output to exceed our upper bound
+              (frac10[] + 1 <= upperFrac10[])
+  if roundUp:
+    inc frac10[]
+
+  var result = $frac10[]
+
+  # Mimic C's printf
+  const Precision = 6
+
+  if Precision > exp10 and exp10 > -Precision:
+    if exp10 > 0:
+      for _ in 1..exp10:
+        result.add '0'
+    elif exp10 < 0:
+      if -exp10 > result.len:
+        result = "0." & repeat('0', -exp10 - result.len - 1) & result
+      else:
+        result.insert ".", result.len + exp10
+  else:
+    if result.len > 1:
+      result.insert ".", 1
+    let e = exp10 + result.len - 2
+    if e != 0:
+      result.add 'E'
+      if e > 0:
+        result.add '+'
+      result.addInt e
+
+  s.add result
+
+func addFloat(s: var string, f: SomeFloat) {.inline.} =
+  ## Add the string representation of the float `f` to the string `s`
+  s.addF f
+
+func addFloat*(s: var string, f: float32) {.inline.} =
+  ## Specialized overload of `addFloat` to provide priority over stdlib's version
+  s.addF f
+
+func addFloat*(s: var string, f: float64) {.inline.} =
+  ## Specialized overload of `addFloat` to provide priority over stdlib's version
+  s.addF f
+
+func dollar(f: SomeFloat): string {.inline.} =
+  result.addFloat f
+
+func `$`*(f: SomeFloat): string {.inline.} =
+  ## Returns the string representation of the float `f`
+  dollar f
+
+func `$`*(f: float32): string {.inline.} =
+  ## Specialized overload of `$` to prioritize this version over stdlib's
+  dollar f
+
+func `$`*(f: float64): string {.inline.} =
+  ## Specialized overload of `$` to prioritize this version over stdlib's
+  dollar f
 
 when isMainModule:
   import unittest
@@ -394,9 +526,16 @@ when isMainModule:
   check sign(NegInf.float32)
   check sign(NegInf.float64)
 
-  var s: string
-  s.addF NaN
-  echo s
-  s.addF 10.1
-  s.addF 10.1f32
-  s.addF 7.175E-43f32
+  template echoCmp(f: untyped) =
+    echo system.`$` f, ' ', f
+  echoCmp NaN
+  echoCmp 10.1
+  echoCmp 10.1f32
+  echoCmp 7.17E-43f32
+  echoCmp 300f
+  echoCmp 1.000305f32
+  echoCmp -1.000305f32
+  echoCmp 1.7976931348623157e+308
+  echoCmp -1.7976931348623157e+308
+  echoCmp 3.4028234e+38f32
+  echoCmp -3.4028234e+38f32
