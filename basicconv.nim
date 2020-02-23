@@ -472,7 +472,7 @@ func addF(s: var string, f: SomeFloat) {.inline.} =
 
   s.add result
 
-func addFloat(s: var string, f: SomeFloat) {.inline.} =
+func addFloat*(s: var string, f: SomeFloat) {.inline.} =
   ## Add the string representation of the float `f` to the string `s`
   s.addF f
 
