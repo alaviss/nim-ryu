@@ -449,7 +449,10 @@ func addF(s: var string, f: SomeFloat) {.inline.} =
   # Mimic C's printf
   const Precision = 6
 
-  if Precision > exp10 and exp10 > -Precision:
+  # the exponent if the ddd.dddE±dd format is used
+  let e = exp10 + result.len - 2
+  # we want it to be reasonably big to use that format
+  if Precision > e and e > -Precision:
     if exp10 > 0:
       for _ in 1..exp10:
         result.add '0'
@@ -461,7 +464,6 @@ func addF(s: var string, f: SomeFloat) {.inline.} =
   else:
     if result.len > 1:
       result.insert ".", 1
-    let e = exp10 + result.len - 2
     if e != 0:
       result.add 'E'
       if e > 0:
@@ -539,3 +541,5 @@ when isMainModule:
   echoCmp -1.7976931348623157e+308
   echoCmp 3.4028234e+38f32
   echoCmp -3.4028234e+38f32
+  echoCmp Inf
+  echoCmp -Inf
