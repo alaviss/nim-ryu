@@ -450,7 +450,7 @@ func addF(s: var string, f: SomeFloat) {.inline.} =
   const Precision = 6
 
   # the exponent if the ddd.dddE±dd format is used
-  let e = exp10 + result.len - 2
+  let e = exp10 + result.len - 1
   # we want it to be reasonably big to use that format
   if Precision > e and e > -Precision:
     if exp10 > 0:
